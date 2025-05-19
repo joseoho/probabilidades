@@ -12,12 +12,12 @@ df_historico = pd.read_excel('animalitos01012324.xlsx')
 print(df_historico.dtypes)
 
 # Asegurarse de que las columnas relevantes sean numéricas
-for col in ['martes', 'miercoles', 'jueves', 'viernes', 'sábado','domingo']:
+for col in ['lunes', 'martes', 'miercoles', 'jueves', 'sábado','domingo']:
     df_historico[col] = pd.to_numeric(df_historico[col], errors='coerce')
 
 # Separar características y objetivo
-X_historico = df_historico[['martes', 'miercoles', 'jueves', 'viernes', 'sábado','domingo']]
-y_train = df_historico[['martes', 'miercoles', 'jueves', 'viernes', 'sábado','domingo']].mean(axis=1, skipna=True)
+X_historico = df_historico[['lunes', 'martes', 'miercoles', 'jueves', 'sábado','domingo']]
+y_train = df_historico[['lunes', 'martes', 'miercoles', 'jueves', 'sábado','domingo']].mean(axis=1, skipna=True)
 
 # Filtrar filas donde y_train no sea NaN
 mask = ~y_train.isna()
@@ -72,12 +72,12 @@ print(f'Stacking Regressor - Root Mean Squared Error (RMSE): {rmse_stacking}')
 print(f'Stacking Regressor - Mean Absolute Error (MAE): {mae_stacking}')
 
 # Agregar las predicciones del día al DataFrame en la columna correspondiente
-df_historico.loc[X_test.index, 'lunes'] = predicciones_viernes_stacking
+df_historico.loc[X_test.index, 'viernes'] = predicciones_viernes_stacking
 
 # Mostrar resultados organizados por hora
-resultados_miercoles = df_historico[['hora', 'lunes']].sort_values(by='hora')
+resultados_miercoles = df_historico[['hora', 'viernes']].sort_values(by='hora')
 
 # Guardar resultados en un nuevo archivo Excel
-resultados_miercoles.to_excel('predicciones_jueves_stacking.xlsx', index=False)
+resultados_miercoles.to_excel('predicciones_viernes_stacking.xlsx', index=False)
 
-print("Las predicciones se han guardado en el archivo 'predicciones_jueves_stacking.xlsx'.")
+print("Las predicciones se han guardado en el archivo 'predicciones_viernes_stacking.xlsx'.")
