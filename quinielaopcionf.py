@@ -7,6 +7,14 @@ import warnings
 from collections import Counter
 import joblib
 
+# Nuevas importaciones para la Red Neuronal
+# Nuevas importaciones para la Red Neuronal (Compatibilidad con Keras 3)
+from tensorflow.keras.models import Sequential  # type: ignore
+from tensorflow.keras.layers import Dense, Dropout # type: ignore
+from tensorflow.keras.utils import to_categorical # type: ignore
+from sklearn.preprocessing import LabelEncoder
+# No necesitamos importar TensorFlow directamente si usamos la ruta de Keras 3
+
 # Configuración global
 pd.set_option('display.max_columns', 50)
 warnings.filterwarnings('ignore')
@@ -14,6 +22,8 @@ warnings.filterwarnings('ignore')
 class QuinielaPredictor:
     def __init__(self):
         self.model = None
+        self.encoder = None  # Para codificar y decodificar los números
+        self.num_classes = 0
         self.model_trained = False
         self.dias_semana = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
         self.columnas_dias = []
@@ -33,34 +43,26 @@ class QuinielaPredictor:
     def load_data(self, filepath):
         """Carga datos con manejo robusto de encabezados"""
         try:
-            # Leer el archivo ignorando encabezados existentes
             df = pd.read_excel(filepath, header=None)
             
-            # Verificar estructura básica
             if df.shape[1] < 8:
                 raise ValueError("El archivo debe tener al menos 8 columnas (hora + 7 días)")
             
-            # Asignar nombres de columnas
             df.columns = ['hora'] + [f'dia_{i}' for i in range(1, df.shape[1])]
-            self.columnas_dias = df.columns[1:]  # Todas excepto 'hora'
+            self.columnas_dias = df.columns[1:]
             
-            print(f"DEBUG: Columnas asignadas - Hora: 'hora', Días: {self.columnas_dias[:7]}... (total: {len(self.columnas_dias)})")
-
-            # Detectar el último día con datos (asignando a días de la semana cíclicamente)
             for i in reversed(range(len(self.columnas_dias))):
-                if not df.iloc[:, i+1].isnull().all():  # +1 para saltar columna hora
+                if not df.iloc[:, i+1].isnull().all():
                     self.ultimo_dia = self.dias_semana[i % 7]
                     break
             
             if self.ultimo_dia is None:
                 raise ValueError("No se encontraron datos válidos en ninguna columna")
             
-            # Limpieza de datos
             for col in self.columnas_dias:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
                 df[col] = df[col].apply(lambda x: x if pd.isna(x) or (0 <= x <= 36) else np.nan)
             
-            # Eliminar filas completamente vacías en los días
             df = df.dropna(subset=self.columnas_dias, how='all')
             df = df.dropna(subset=['hora'])
             
@@ -85,7 +87,6 @@ class QuinielaPredictor:
             print("No hay datos para calcular estadísticas")
             return
             
-        # Aplanar todos los números
         all_nums = []
         for col in self.columnas_dias:
             all_nums.extend(df[col].dropna().astype(int).tolist())
@@ -94,11 +95,9 @@ class QuinielaPredictor:
             print("No se encontraron números válidos")
             return
             
-        # Frecuencias generales
         counts = Counter(all_nums)
         self.most_frequent_overall = [num for num, _ in counts.most_common(8)]
         
-        # Números recientes (últimas 100 filas)
         recent_nums = []
         for _, row in df.tail(100).iterrows():
             for col in self.columnas_dias:
@@ -144,7 +143,6 @@ class QuinielaPredictor:
         self.model = "probabilistico"
         self.model_trained = True
         
-        # Calcular probabilidades por hora y día
         self.probabilidades = df_long.groupby(['hora', 'dia_num'])['numero'].apply(
             lambda x: x.value_counts(normalize=True).to_dict()
         ).to_dict()
@@ -154,19 +152,18 @@ class QuinielaPredictor:
         return self.model
 
     def train_model(self, df):
-        """Entrena el modelo adaptativo"""
-        # Convertir a formato largo
+        """Entrena el modelo adaptativo (ahora Red Neuronal)"""
         records = []
         for _, row in df.iterrows():
             for i, col in enumerate(self.columnas_dias):
                 num = row[col]
                 if pd.notna(num):
-                    dia_num = i % 7  # Asignar días cíclicamente
+                    dia_num = i % 7
                     records.append({
                         'hora': int(row['hora']),
                         'numero': int(num),
                         'dia_num': dia_num,
-                        'es_finde': int(dia_num >= 5)  # 1 si es fin de semana
+                        'es_finde': int(dia_num >= 5)
                     })
         
         if not records:
@@ -174,11 +171,8 @@ class QuinielaPredictor:
             return self.train_probabilistic_model(pd.DataFrame())
             
         df_long = pd.DataFrame(records)
-        
-        # Crear características adicionales
         df_long['hora_dia'] = df_long['hora'] * (df_long['dia_num'] + 1)
         
-        # Entrenamiento según cantidad de datos
         if len(df_long) < 50:
             print("Pocos datos. Usando modelo probabilístico")
             return self.train_probabilistic_model(df_long)
@@ -187,18 +181,49 @@ class QuinielaPredictor:
             X = df_long[['hora', 'dia_num', 'hora_dia', 'es_finde']]
             y = df_long['numero']
             
-            X_train, self.X_test, y_train, self.y_test = train_test_split(
-                X, y, test_size=self.test_size, random_state=self.random_state
+            # --- Preparación de datos para la Red Neuronal ---
+            self.encoder = LabelEncoder()
+            y_encoded = self.encoder.fit_transform(y)
+            y_categorical = to_categorical(y_encoded)
+            self.num_classes = len(self.encoder.classes_)
+
+            X_train, self.X_test, y_train_cat, self.y_test_cat = train_test_split(
+                X, y_categorical, test_size=self.test_size, random_state=self.random_state
             )
             
-            self.model = RandomForestClassifier(
-                n_estimators=100,
-                random_state=self.random_state,
-                class_weight='balanced'
+            self.y_test = self.encoder.inverse_transform(np.argmax(self.y_test_cat, axis=1))
+
+            # --- Definición y Entrenamiento de la Red Neuronal ---
+            input_shape = X_train.shape[1]
+            model = Sequential([
+                Dense(128, activation='relu', input_shape=(input_shape,)),
+                Dropout(0.3),
+                Dense(64, activation='relu'),
+                Dense(self.num_classes, activation='softmax')
+            ])
+
+            model.compile(
+                optimizer='adam',
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
             )
-            self.model.fit(X_train, y_train)
+
+            print("\n⚙️ Entrenando Red Neuronal (Keras)...")
+            model.fit(
+                X_train, y_train_cat,
+                epochs=50,
+                batch_size=32,
+                validation_split=0.1,
+                verbose=0
+            )
+            print("✅ Red Neuronal entrenada.")
+
+            self.model = model
             self.model_trained = True
-            self.y_pred_test = self.model.predict(self.X_test)
+            
+            y_pred_proba = self.model.predict(self.X_test, verbose=0)
+            y_pred_encoded = np.argmax(y_pred_proba, axis=1)
+            self.y_pred_test = self.encoder.inverse_transform(y_pred_encoded)
             
             self.evaluate_model()
             return self.model
@@ -218,7 +243,8 @@ class QuinielaPredictor:
         predicciones = []
         
         for hora in horas:
-            if strategy == "modelo" and self.model_trained and isinstance(self.model, RandomForestClassifier):
+            num = None
+            if strategy == "modelo" and self.model_trained and not isinstance(self.model, str):
                 try:
                     X_new = pd.DataFrame([{
                         'hora': hora,
@@ -226,10 +252,12 @@ class QuinielaPredictor:
                         'hora_dia': hora * (dia_num + 1),
                         'es_finde': int(dia_num >= 5)
                     }])
-                    proba = self.model.predict_proba(X_new)[0]
-                    nums = self.model.classes_
+                    
+                    proba = self.model.predict(X_new, verbose=0)[0]
+                    nums = self.encoder.classes_
                     num = np.random.choice(nums, p=proba)
-                except:
+                except Exception as e:
+                    #print(f"DEBUG: Fallo en predicción NN: {e}")
                     num = np.random.choice(self.all_possible_numbers)
                     
             elif strategy == "calientes":
@@ -242,12 +270,11 @@ class QuinielaPredictor:
                 combined = list(set(self.hot_numbers + self.cold_numbers + self.most_frequent_overall))
                 num = np.random.choice(combined if combined else self.all_possible_numbers)
                 
-            else:  # Aleatorio
+            else: # Aleatorio
                 num = np.random.choice(self.all_possible_numbers)
-                
+            
             predicciones.append(f"{num:02d}")
             
-        # Mezclar predicciones para evitar repeticiones
         if len(set(predicciones)) < len(horas)/2:
             unique = list(set(predicciones))
             extra = np.random.choice(
@@ -265,6 +292,103 @@ class QuinielaPredictor:
             'Estrategia': strategy
         })
 
+    def generate_mixed_numbers(self, dia_semana, total_numbers=12):
+        """Genera 12 números mezclando las 5 estrategias disponibles"""
+        try:
+            dia_num = self.dias_semana.index(dia_semana.lower())
+        except ValueError:
+            raise ValueError(f"Día debe ser uno de: {', '.join(self.dias_semana)}")
+        
+        print(f"\n🎲 Generando {total_numbers} números mezclando todas las estrategias...")
+        
+        # Definir cuántos números generar por cada estrategia
+        numbers_per_strategy = total_numbers // 5
+        extra_numbers = total_numbers % 5
+        
+        mixed_numbers = []
+        
+        # Estrategias disponibles
+        estrategias = ['modelo', 'calientes', 'frios', 'balanceado', 'aleatorio']
+        
+        for i, estrategia in enumerate(estrategias):
+            # Para la última estrategia, agregar los números extra
+            count = numbers_per_strategy + (1 if i == len(estrategias) - 1 else 0) if extra_numbers > 0 else numbers_per_strategy
+            
+            if i == 0:  # Para modelo, usar horas específicas
+                horas = list(range(10, 10 + count))
+            else:
+                horas = [10] * count  # Hora fija para otras estrategias
+            
+            for hora in horas:
+                num = None
+                if estrategia == "modelo" and self.model_trained and not isinstance(self.model, str):
+                    try:
+                        X_new = pd.DataFrame([{
+                            'hora': hora,
+                            'dia_num': dia_num,
+                            'hora_dia': hora * (dia_num + 1),
+                            'es_finde': int(dia_num >= 5)
+                        }])
+                        
+                        proba = self.model.predict(X_new, verbose=0)[0]
+                        nums = self.encoder.classes_
+                        num = np.random.choice(nums, p=proba)
+                    except Exception as e:
+                        num = np.random.choice(self.all_possible_numbers)
+                        
+                elif estrategia == "calientes":
+                    num = np.random.choice(self.hot_numbers if self.hot_numbers else self.all_possible_numbers)
+                    
+                elif estrategia == "frios":
+                    num = np.random.choice(self.cold_numbers if self.cold_numbers else self.all_possible_numbers)
+                    
+                elif estrategia == "balanceado":
+                    combined = list(set(self.hot_numbers + self.cold_numbers + self.most_frequent_overall))
+                    num = np.random.choice(combined if combined else self.all_possible_numbers)
+                    
+                else: # Aleatorio
+                    num = np.random.choice(self.all_possible_numbers)
+                
+                mixed_numbers.append({
+                    'Número': f"{num:02d}",
+                    'Estrategia': estrategia,
+                    'Hora': f"{hora}:00" if estrategia == "modelo" else "Variable"
+                })
+        
+        # Mezclar los números para que no estén agrupados por estrategia
+        np.random.shuffle(mixed_numbers)
+        
+        # Asegurar que no haya duplicados
+        unique_numbers = []
+        seen_numbers = set()
+        
+        for num_data in mixed_numbers:
+            if num_data['Número'] not in seen_numbers:
+                unique_numbers.append(num_data)
+                seen_numbers.add(num_data['Número'])
+        
+        # Si hay menos de 12 números únicos, completar con números aleatorios
+        while len(unique_numbers) < total_numbers:
+            new_num = f"{np.random.choice(self.all_possible_numbers):02d}"
+            if new_num not in seen_numbers:
+                unique_numbers.append({
+                    'Número': new_num,
+                    'Estrategia': 'complementario',
+                    'Hora': 'Variable'
+                })
+                seen_numbers.add(new_num)
+        
+        # Crear DataFrame con los resultados
+        df_resultados = pd.DataFrame(unique_numbers[:total_numbers])
+        
+        # Mostrar resumen por estrategia
+        print(f"\n📊 Resumen por estrategia:")
+        summary = df_resultados['Estrategia'].value_counts()
+        for estrategia, count in summary.items():
+            print(f"  - {estrategia.capitalize()}: {count} números")
+        
+        return df_resultados
+
 def main():
     print("\n🔮 Quiniela Predictor - Versión Corregida 🔮")
     print("="*50)
@@ -281,7 +405,6 @@ def main():
         print(f"\n📆 Último día con datos: {predictor.ultimo_dia.capitalize()}")
         siguiente_dia = predictor.get_next_day()
         
-        # Interfaz de usuario simple
         print("\nOpciones de día:")
         print(f"1. Predecir {siguiente_dia.capitalize()} (siguiente día)")
         print("2. Elegir otro día")
@@ -302,37 +425,51 @@ def main():
         print("c. Números fríos")
         print("d. Balanceado")
         print("e. Aleatorio")
-        estrategia = input("Seleccione estrategia (a-e): ").lower().strip()
+        print("f. MEZCLA (12 números combinando todas las estrategias)")
+        estrategia_opcion = input("Seleccione estrategia (a-f): ").lower().strip()
         
         estrategias = {
             'a': 'modelo',
             'b': 'calientes',
             'c': 'frios',
             'd': 'balanceado',
-            'e': 'aleatorio'
+            'e': 'aleatorio',
+            'f': 'mezcla'
         }
-        estrategia = estrategias.get(estrategia, 'aleatorio')
+        estrategia = estrategias.get(estrategia_opcion, 'aleatorio')
         
-        # Procesamiento
         print("\n🔧 Calculando estadísticas...")
         predictor.calculate_number_stats(df)
         
         print("\n🤖 Entrenando modelo...")
         predictor.train_model(df)
         
-        print(f"\n🎯 Generando predicciones para {dia.capitalize()}...")
-        resultados = predictor.predict_day(dia, estrategia)
-        
-        print("\n📋 Resultados:")
-        print(resultados.to_string(index=False))
-        
-        # Guardar resultados
-        try:
-            archivo = f"prediccion_{dia}_{estrategia}.xlsx"
-            resultados.to_excel(archivo, index=False)
-            print(f"\n💾 Resultados guardados en '{archivo}'")
-        except Exception as e:
-            print(f"\n⚠️ No se pudo guardar el archivo: {str(e)}")
+        if estrategia == 'mezcla':
+            print(f"\n🎯 Generando 12 números mezclados para {dia.capitalize()}...")
+            resultados = predictor.generate_mixed_numbers(dia, 12)
+            
+            print("\n📋 Resultados (12 números mezclados):")
+            print(resultados.to_string(index=False))
+            
+            try:
+                archivo = f"prediccion_mezcla_{dia}.xlsx"
+                resultados.to_excel(archivo, index=False)
+                print(f"\n💾 Resultados guardados en '{archivo}'")
+            except Exception as e:
+                print(f"\n⚠️ No se pudo guardar el archivo: {str(e)}")
+        else:
+            print(f"\n🎯 Generando predicciones para {dia.capitalize()}...")
+            resultados = predictor.predict_day(dia, estrategia)
+            
+            print("\n📋 Resultados:")
+            print(resultados.to_string(index=False))
+            
+            try:
+                archivo = f"prediccion_{dia}_{estrategia}.xlsx"
+                resultados.to_excel(archivo, index=False)
+                print(f"\n💾 Resultados guardados en '{archivo}'")
+            except Exception as e:
+                print(f"\n⚠️ No se pudo guardar el archivo: {str(e)}")
             
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
